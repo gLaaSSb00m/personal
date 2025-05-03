@@ -12,8 +12,8 @@ from torchsummary import summary
 import matplotlib.pyplot as plt  # Add this import at the top of the file
 
 # Paths to the dataset
-dir_img = Path('Pytorch_UNet\segmentation_full_body_mads_dataset_1192_img\images_preprocessed')
-dir_mask = Path('Pytorch_UNet\segmentation_full_body_mads_dataset_1192_img\masks_preprocessed')
+dir_img = Path('segmentation_full_body_mads_dataset_1192_img\images')
+dir_mask = Path('segmentation_full_body_mads_dataset_1192_img\masks')
 dir_checkpoint = Path('./checkpoints/')
 
 # Training function
@@ -52,6 +52,9 @@ def train_model(
     for epoch in range(epochs):
         model.train()
         epoch_loss = 0
+        epoch_accuracy = 0
+        total_samples = 0
+
         with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 images, true_masks = batch['image'], batch['mask']
@@ -65,12 +68,25 @@ def train_model(
                 masks_pred = model(images)
                 loss = criterion(masks_pred, true_masks)
 
+                # Add Dice loss for binary or multiclass segmentation
                 if model.n_classes == 1:
                     loss += dice_loss(torch.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
                 else:
                     one_hot_masks = torch.nn.functional.one_hot(true_masks, num_classes=model.n_classes)
                     one_hot_masks = one_hot_masks.permute(0, 3, 1, 2).float()
                     loss += dice_loss(torch.softmax(masks_pred, dim=1).float(), one_hot_masks, multiclass=True)
+
+                # Compute accuracy
+                with torch.no_grad():
+                    if model.n_classes == 1:
+                        pred_binary = (torch.sigmoid(masks_pred) > 0.5).float()
+                        batch_accuracy = (pred_binary == true_masks.float()).float().mean().item()
+                    else:
+                        pred_classes = torch.argmax(masks_pred, dim=1)
+                        batch_accuracy = (pred_classes == true_masks).float().mean().item()
+
+                epoch_accuracy += batch_accuracy * images.shape[0]
+                total_samples += images.shape[0]
 
                 # Backward pass
                 optimizer.zero_grad()
@@ -79,10 +95,11 @@ def train_model(
 
                 pbar.update(images.shape[0])
                 epoch_loss += loss.item()
-                pbar.set_postfix(**{'loss (batch)': loss.item()})
+                pbar.set_postfix(**{'loss (batch)': loss.item(), 'accuracy (batch)': batch_accuracy})
 
-        # Compute average training loss for the epoch
+        # Compute average training metrics for the epoch
         avg_train_loss = epoch_loss / len(train_loader)
+        avg_train_accuracy = epoch_accuracy / total_samples
         train_losses.append(avg_train_loss)
 
         # Validation
@@ -90,7 +107,9 @@ def train_model(
         val_losses.append(val_loss)  # Append the validation loss for plotting
         scheduler.step(val_score)  # Pass only the validation Dice score to the scheduler
 
-        logging.info(f'Epoch {epoch + 1}: Train Loss: {avg_train_loss:.4f}, Val Dice: {val_score:.4f}, Val Loss: {val_loss:.4f}')
+        logging.info(f'Epoch {epoch + 1}: '
+                     f'Train Loss: {avg_train_loss:.4f}, Train Accuracy: {avg_train_accuracy:.4f}, '
+                     f'Val Loss: {val_loss:.4f}, Val Dice: {val_score:.4f}')
 
         # Save checkpoint
         dir_checkpoint.mkdir(parents=True, exist_ok=True)
